@@ -1,0 +1,145 @@
+const express = require('express');
+const cors = require('cors');
+
+const app = express();
+const PORT = process.env.PORT || 3100;
+
+// Your Anthropic API key - set this as a Railway environment variable
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+if (!ANTHROPIC_API_KEY) {
+  console.error('❌ ANTHROPIC_API_KEY environment variable is required');
+  process.exit(1);
+}
+
+// CORS - allow your GitHub Pages domain
+const ALLOWED_ORIGINS = [
+  'https://www.umbrassi.com',
+  'https://umbrassi.com',
+  'https://msg-headquarters.github.io',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'null', // for local file:// testing
+];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log(`⚠️ Blocked origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type'],
+}));
+
+app.use(express.json({ limit: '1mb' }));
+
+// Rate limiting - simple in-memory (per IP, 30 requests per minute)
+const rateLimitMap = new Map();
+const RATE_LIMIT = 30;
+const RATE_WINDOW = 60 * 1000; // 1 minute
+
+function rateLimit(req, res, next) {
+  const ip = req.headers['x-forwarded-for'] || req.ip;
+  const now = Date.now();
+  const record = rateLimitMap.get(ip);
+
+  if (!record || now - record.windowStart > RATE_WINDOW) {
+    rateLimitMap.set(ip, { windowStart: now, count: 1 });
+    return next();
+  }
+
+  if (record.count >= RATE_LIMIT) {
+    return res.status(429).json({ error: 'Too many requests. Please wait a moment.' });
+  }
+
+  record.count++;
+  return next();
+}
+
+// Clean up rate limit map every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of rateLimitMap.entries()) {
+    if (now - record.windowStart > RATE_WINDOW * 2) {
+      rateLimitMap.delete(ip);
+    }
+  }
+}, 5 * 60 * 1000);
+
+// Health check
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    service: 'Speak Easy AI Proxy',
+    version: '1.0.0',
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy' });
+});
+
+// Proxy endpoint for Claude API
+app.post('/api/chat', rateLimit, async (req, res) => {
+  try {
+    const { messages, system } = req.body;
+
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'messages array is required' });
+    }
+
+    if (!system || typeof system !== 'string') {
+      return res.status(400).json({ error: 'system prompt is required' });
+    }
+
+    // Validate message format
+    for (const msg of messages) {
+      if (!msg.role || !msg.content) {
+        return res.status(400).json({ error: 'Each message must have role and content' });
+      }
+      if (!['user', 'assistant'].includes(msg.role)) {
+        return res.status(400).json({ error: 'Message role must be user or assistant' });
+      }
+    }
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: system,
+        messages: messages,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.error('Anthropic API error:', data.error);
+      return res.status(response.status).json({ error: data.error.message });
+    }
+
+    res.json({
+      content: data.content,
+    });
+
+  } catch (error) {
+    console.error('Proxy error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🗣️ Speak Easy AI Proxy running on port ${PORT}`);
+  console.log(`📡 Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
+});
