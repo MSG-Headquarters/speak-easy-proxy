@@ -22,10 +22,13 @@ const ALLOWED_ORIGINS = [
   'null', // for local file:// testing
 ];
 
+// Any localhost/127.0.0.1 origin on any port — covers Vite landing on 5174+ in dev.
+const LOCALHOST_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
+
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (mobile apps, curl, etc.)
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+    if (!origin || ALLOWED_ORIGINS.includes(origin) || LOCALHOST_ORIGIN.test(origin)) {
       callback(null, true);
     } else {
       console.log(`⚠️ Blocked origin: ${origin}`);
@@ -115,7 +118,7 @@ app.post('/api/chat', rateLimit, async (req, res) => {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         max_tokens: 1000,
         system: system,
         messages: messages,
