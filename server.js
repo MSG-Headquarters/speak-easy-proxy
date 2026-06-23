@@ -12,6 +12,17 @@ if (!ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
+// ElevenLabs text-to-speech (Luna's voice). Key is set as a Railway environment variable.
+// To change Luna's voice or TTS model later, edit these two constants — one-line change each.
+const ELEVENLABS_VOICE_ID = 'gJx1vCzNCD1EQHT212Ls'; // Ava
+const ELEVENLABS_MODEL_ID = 'eleven_multilingual_v2'; // bidirectional es<->en, multilingual required
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+
+// Warn but don't exit if the TTS key is missing — /api/chat must keep working without it.
+if (!ELEVENLABS_API_KEY) {
+  console.warn('⚠️ ELEVENLABS_API_KEY not set — /api/tts will return 500 until it is configured');
+}
+
 // CORS - allow your GitHub Pages domain
 const ALLOWED_ORIGINS = [
   'https://www.umbrassi.com',
@@ -139,6 +150,57 @@ app.post('/api/chat', rateLimit, async (req, res) => {
   } catch (error) {
     console.error('Proxy error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Text-to-speech endpoint — ElevenLabs. Returns raw audio/mpeg bytes (no base64, no wrapper).
+app.post('/api/tts', rateLimit, async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    // Mirror /api/chat's input validation: clear 400, never a crash.
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      return res.status(400).json({ error: 'text is required and must be a non-empty string' });
+    }
+
+    if (!ELEVENLABS_API_KEY) {
+      console.error('TTS request received but ELEVENLABS_API_KEY is not configured');
+      return res.status(500).json({ error: 'Text-to-speech is not configured' });
+    }
+
+    const upstream = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: text,
+          model_id: ELEVENLABS_MODEL_ID,
+        }),
+      }
+    );
+
+    if (!upstream.ok) {
+      // Read the upstream body for our own logs only — it never contains the key.
+      const detail = await upstream.text().catch(() => '');
+      console.error(`ElevenLabs TTS error ${upstream.status}: ${detail.slice(0, 500)}`);
+      return res
+        .status(502)
+        .json({ error: `Text-to-speech upstream error (status ${upstream.status})` });
+    }
+
+    // Stream the raw audio straight back so the client can play it directly.
+    const audio = Buffer.from(await upstream.arrayBuffer());
+    res.set('Content-Type', 'audio/mpeg');
+    res.set('Content-Length', String(audio.length));
+    return res.send(audio);
+
+  } catch (error) {
+    console.error('TTS proxy error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
